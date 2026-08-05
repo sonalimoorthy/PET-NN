@@ -1,14 +1,20 @@
 # PET-NN
 
-A JAX-based neural network surrogate for **Physiological Equivalent Temperature (PET)** prediction. It replaces the iterative `pythermalcomfort.pet_steady` solver with a lightweight neural network that produces predictions in milliseconds, at ~0.05 °C accuracy, for large-scale urban climate simulations and thermal comfort studies.
+A JAX-based neural network surrogate for **Physiological Equivalent Temperature (PET)** prediction. It replaces the iterative `pythermalcomfort.pet_steady` solver with a lightweight neural network that produces predictions in milliseconds, at ~0.05–0.06 °C MAE, for large-scale urban climate simulations and thermal comfort studies.
 
 ---
 
 ## Overview
 
-PET is a widely used thermal comfort index that quantifies how humans perceive outdoor environmental conditions. Computing it via `pet_steady` requires an iterative thermophysiological heat-balance solve, which is too slow to run at scale (e.g. per grid cell, per timestep, across a city). This repository trains an MLP surrogate on `pet_steady`-labelled data that reproduces the solver's output to within ~0.05 °C, at over 600× the speed.
+PET is a widely used thermal comfort index that quantifies how humans perceive outdoor environmental conditions. Computing it via `pet_steady` requires an iterative thermophysiological heat-balance solve, which is too slow to run at scale (e.g. per grid cell, per timestep, across a city). This repository trains an MLP surrogate on `pet_steady`-labelled data that reproduces the solver's output to within ~0.05–0.06 °C, at over 1000× the speed.
 
-The full pipeline — data generation, model, training, and benchmarking — lives in **`PET_Solver.ipynb`**.
+The repo contains both the original exploratory pipeline (**`PET_Solver.ipynb`**) and a refactored, standalone version split into scripts:
+
+* **`data_generation.py`** — generates `data/train.csv` and `data/test.csv`
+* **`method1.py`** — MLP surrogate with plain `/100`-style input scaling
+* **`method2.py`** — MLP surrogate with mean-centered input scaling
+
+Unlike the notebook, the scripts do scaling *inside* the model (raw physical units go in, PET in °C comes out — no external `scale_X`/`scale_Y`/`unscale_Y` step).
 
 ---
 
@@ -27,9 +33,9 @@ All other `pet_steady` inputs are held fixed: metabolic rate (MET=1.7), clothing
 
 ### Data generation
 
-Inputs are sampled uniformly at random over the ranges above. Near the edges of the box (high `tdb` combined with high `rh`), the underlying heat-balance solver can fail to converge and raises a `RuntimeWarning`. Training data is restricted to a **safe zone**: at or below 30 °C any humidity is allowed, and above 30 °C the maximum allowed humidity decreases piecewise-linearly with temperature (down to 40% by 46 °C+). This keeps the solver's `RuntimeWarning` rate at 0% in the training/test sets, versus ~4.9% for unrestricted uniform sampling. The notebook's boundary-case analysis section compares this safe-zone restriction against plain unrestricted sampling and a resample-on-warning strategy across 30,000-sample draws.
+Inputs are sampled uniformly at random over the ranges above. Near the edges of the box (high `tdb` combined with high `rh`), the underlying heat-balance solver can fail to converge and raises a `RuntimeWarning`. Training/test data is restricted to a **safe zone**: at or below `tdb=35°C` any humidity is allowed, and above 35 °C the maximum allowed humidity decreases linearly with temperature down to 50% by 50 °C. Any sample that still triggers a solver `RuntimeWarning` is discarded and resampled from scratch, so the shipped datasets have a 0% warning rate.
 
-30,000 training samples and 10,000 test samples are generated this way and labelled with the real `pet_steady` solver.
+The training set additionally uses **hard-region oversampling**: `tdb > 35 °C` is where the trained surrogates' error is highest, and the safe-zone rule above already makes that region sample-sparser (lower accept rate). After drawing a uniform 30,000-point base set, `data_generation.py` measures that region's samples-per-degree and draws extra `tdb ∈ [35, 50]`-only points to top it up to match the rest of the range (currently ~5,000 extra points, for ~35,000 total training rows). The 10,000-point **test set stays uniform** (drawn from the same random stream position the original baseline used) so accuracy numbers reflect true uniform-deployment conditions, not the boosted training distribution.
 
 ---
 
@@ -44,7 +50,10 @@ v, rh, log_v ──► Dense(256) ─ SiLU ─► Dense(256) ─ SiLU ─┘
 ```
 
 * **Activation:** `SiLU`, with standard He-normal weight init.
-* **Feature scaling:** `tdb/100`, `tr/100`, `v/10`, `rh/100`, plus `log_v = (log(v) - log(V_MIN)) / (log(V_MAX) - log(V_MIN))`. The extra log-scaled wind feature exists because `v` spans 4 orders of magnitude (0.0003–10 m/s); a linear scaling alone leaves almost no resolution in the low-wind regime. Output `pet` is scaled by `/100` and unscaled by `×100`.
+* **Feature scaling** differs between the two script variants (both keep the same `log_v = (log(v) - log(V_MIN)) / (log(V_MAX) - log(V_MIN))` wind feature, since `v` spans 4 orders of magnitude and a linear scaling alone leaves almost no resolution in the low-wind regime):
+  * **method1** (`/100`-style): `tdb/100`, `tr/100`, `v/10`, `rh/100`
+  * **method2** (mean-centered): `(tdb-30)/100`, `(tr-50)/100`, `v/10`, `(rh-80)/100`
+* Output `pet` is scaled by `/100` and unscaled by `×100` internally — both scripts return PET directly in °C from raw inputs.
 
 **Why `SiLU` and not a periodic (SIREN-style) activation:** an earlier version of this model used `sin(2π·x)` activations (a SIREN-style design intended for high-frequency implicit signal fitting, e.g. images/audio). PET is a smooth, low-frequency function of 4 physical inputs, and stacking that periodic nonlinearity 4 layers deep produced a rugged loss landscape the optimizer couldn't escape — training converged to R² ≈ 0 (MAE ≈ 11 °C), i.e. it just predicted the mean. Switching to `SiLU` + He init on the same two-branch structure fixed convergence entirely.
 
@@ -52,7 +61,7 @@ v, rh, log_v ──► Dense(256) ─ SiLU ─► Dense(256) ─ SiLU ─┘
 
 * **Framework:** JAX + Flax + Optax
 * **Optimizer:** Adam with a warmup–cosine-decay learning rate schedule (peak 1e-3, decayed to 1e-6 over the full run)
-* **Loss:** MSE on scaled PET, tracked alongside held-out validation MAE in real °C
+* **Loss:** MSE on raw-°C PET, tracked alongside held-out validation MAE
 * **Epochs:** 1200 (full budget, no early stopping)
 * **Batch size:** 512
 * **Training loop:** data is moved to device once and each epoch runs as a single `jax.lax.scan` call over pre-batched, pre-shuffled data, instead of a Python loop dispatching one JIT call per batch. This was the main lever for CPU training speed — the scanned version trains ~1200 epochs in well under 15 minutes on CPU alone.
@@ -61,20 +70,19 @@ v, rh, log_v ──► Dense(256) ─ SiLU ─► Dense(256) ─ SiLU ─┘
 
 ## Performance
 
-Benchmarked on the 10,000-sample held-out test set after the full 1200-epoch run:
+Benchmarked on the 10,000-sample uniform held-out test set after the full 1200-epoch run, with hard-region oversampling applied to the training set:
 
-| Metric                         | Value      |
-| ------------------------------- | ---------- |
-| Validation MAE                  | 0.0482 °C  |
-| Test MAE                        | 0.0484 °C  |
-| Test RMSE                       | 0.089 °C   |
-| Test R²                         | 0.99995    |
-| Max absolute error              | 4.72 °C    |
-| Relative L2 error               | 0.29%      |
-| Mean absolute relative error    | 0.16%      |
-| NN inference, 10k samples       | ~0.09 s    |
-| `pet_steady`, 10k samples       | ~64 s      |
-| **Speed-up**                    | **~684×**  |
+| Metric                         | method1     | method2     |
+| ------------------------------- | ----------- | ----------- |
+| Test MAE                        | 0.0539 °C   | 0.0636 °C   |
+| Test RMSE                       | 0.0848 °C   | 0.0938 °C   |
+| Max absolute error              | 1.620 °C    | 1.589 °C    |
+| Relative L2 error               | 0.244%      | 0.270%      |
+| Mean absolute relative error    | 0.155%      | 0.197%      |
+| NN inference, 10k samples       | ~0.04 s     | ~0.03 s     |
+| **Speed-up vs `pet_steady`**    | **>1000×**  | **>1000×**  |
+
+Full per-run metrics (including R², reference-solver timing) are in `output/benchmark_method1.csv` and `output/benchmark_method2.csv`; per-sample predictions and errors are in `output/predictions_method1.csv` / `output/predictions_method2.csv`.
 
 ---
 
@@ -93,11 +101,23 @@ conda activate pet_nn
 pip install jax flax optax scikit-learn numpy pandas matplotlib seaborn pythermalcomfort jupyter
 ```
 
+(`jupyter` is only needed if you plan to run `PET_Solver.ipynb`; the standalone scripts below don't require it.)
+
 ---
 
 ## Usage
 
-Launch the notebook:
+### Standalone scripts
+
+```bash
+python data_generation.py   # writes data/train.csv, data/test.csv
+python method1.py           # trains + benchmarks the /100-scaling variant
+python method2.py           # trains + benchmarks the mean-centered variant
+```
+
+Each training script saves its trained params (`output/model_method*.pickle`), a benchmark CSV, a predictions CSV, and a parity plot.
+
+### Notebook (original, exploratory pipeline)
 
 ```bash
 jupyter notebook PET_Solver.ipynb
@@ -121,7 +141,13 @@ Input order is `(tdb, tr, v, rh)`; `pet_nn` also accepts arrays for batched infe
 ```text
 PET-NN/
 │
-├── PET_Solver.ipynb   # Data generation, model, training, benchmarking, boundary-case analysis
+├── PET_Solver.ipynb              # Original notebook: data gen, model, training, benchmarking, boundary-case analysis
+├── PET_Solver_Explained_1.html   # Rendered walkthrough of the notebook
+├── data_generation.py            # Standalone data generation (safe-zone + hard-region oversampling)
+├── method1.py                    # MLP surrogate, /100-style scaling
+├── method2.py                    # MLP surrogate, mean-centered scaling
+├── data/                         # Generated train/test CSVs + distribution plots
+├── output/                       # Trained model params, benchmarks, predictions, parity plots
 └── README.md
 ```
 
@@ -143,6 +169,7 @@ PET-NN/
 * Trained only over `tdb` 10–50 °C, `tr` 10–80 °C, `v` 0.0003–10 m/s, `rh` 30–100% (and further restricted to the safe zone at high temperature/humidity) — accuracy outside this range is untested.
 * All non-variable `pet_steady` inputs (metabolic rate, clothing, age, sex, body size, etc.) are fixed at the values above; the surrogate does not generalize across different physiological parameters without retraining.
 * The training data itself is only as accurate as `pet_steady`.
+* Max absolute error (~1.6 °C) is driven by a small number of individually hard points where `pet_steady`'s response surface is sharply nonlinear — more training data alone doesn't fully resolve these.
 
 ---
 
@@ -151,6 +178,7 @@ PET-NN/
 * Extend to variable physiological parameters (age, sex, clothing, metabolic rate) as additional inputs
 * Uncertainty quantification
 * GPU-optimized training/deployment pipeline
+* Seed ensembling to further reduce worst-case error
 
 ---
 
