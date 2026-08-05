@@ -8,7 +8,7 @@ scale_X/scale_Y/unscale_Y anywhere in this script.
 
 Run standalone (expects data/train.csv and data/test.csv, see
 data_generation.py):
-    python method1.py
+    python PET_model1.py
 """
 import os
 import pickle

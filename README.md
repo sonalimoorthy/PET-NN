@@ -11,8 +11,8 @@ PET is a widely used thermal comfort index that quantifies how humans perceive o
 The repo contains both the original exploratory pipeline (**`PET_Solver.ipynb`**) and a refactored, standalone version split into scripts:
 
 * **`data_generation.py`** — generates `data/train.csv` and `data/test.csv`
-* **`method1.py`** — MLP surrogate with plain `/100`-style input scaling
-* **`method2.py`** — MLP surrogate with mean-centered input scaling
+* **`PET_model1.py`** — MLP surrogate with plain `/100`-style input scaling
+* **`PET_model2.py`** — MLP surrogate with mean-centered input scaling
 
 Unlike the notebook, the scripts do scaling *inside* the model (raw physical units go in, PET in °C comes out — no external `scale_X`/`scale_Y`/`unscale_Y` step).
 
@@ -51,8 +51,8 @@ v, rh, log_v ──► Dense(256) ─ SiLU ─► Dense(256) ─ SiLU ─┘
 
 * **Activation:** `SiLU`, with standard He-normal weight init.
 * **Feature scaling** differs between the two script variants (both keep the same `log_v = (log(v) - log(V_MIN)) / (log(V_MAX) - log(V_MIN))` wind feature, since `v` spans 4 orders of magnitude and a linear scaling alone leaves almost no resolution in the low-wind regime):
-  * **method1** (`/100`-style): `tdb/100`, `tr/100`, `v/10`, `rh/100`
-  * **method2** (mean-centered): `(tdb-30)/100`, `(tr-50)/100`, `v/10`, `(rh-80)/100`
+  * **PET_model1** (`/100`-style): `tdb/100`, `tr/100`, `v/10`, `rh/100`
+  * **PET_model2** (mean-centered): `(tdb-30)/100`, `(tr-50)/100`, `v/10`, `(rh-80)/100`
 * Output `pet` is scaled by `/100` and unscaled by `×100` internally — both scripts return PET directly in °C from raw inputs.
 
 **Why `SiLU` and not a periodic (SIREN-style) activation:** an earlier version of this model used `sin(2π·x)` activations (a SIREN-style design intended for high-frequency implicit signal fitting, e.g. images/audio). PET is a smooth, low-frequency function of 4 physical inputs, and stacking that periodic nonlinearity 4 layers deep produced a rugged loss landscape the optimizer couldn't escape — training converged to R² ≈ 0 (MAE ≈ 11 °C), i.e. it just predicted the mean. Switching to `SiLU` + He init on the same two-branch structure fixed convergence entirely.
@@ -72,7 +72,7 @@ v, rh, log_v ──► Dense(256) ─ SiLU ─► Dense(256) ─ SiLU ─┘
 
 Benchmarked on the 10,000-sample uniform held-out test set after the full 1200-epoch run, with hard-region oversampling applied to the training set:
 
-| Metric                         | method1     | method2     |
+| Metric                         | PET_model1  | PET_model2  |
 | ------------------------------- | ----------- | ----------- |
 | Test MAE                        | 0.0539 °C   | 0.0636 °C   |
 | Test RMSE                       | 0.0848 °C   | 0.0938 °C   |
@@ -111,8 +111,8 @@ pip install jax flax optax scikit-learn numpy pandas matplotlib seaborn pytherma
 
 ```bash
 python data_generation.py   # writes data/train.csv, data/test.csv
-python method1.py           # trains + benchmarks the /100-scaling variant
-python method2.py           # trains + benchmarks the mean-centered variant
+python PET_model1.py        # trains + benchmarks the /100-scaling variant
+python PET_model2.py        # trains + benchmarks the mean-centered variant
 ```
 
 Each training script saves its trained params (`output/model_method*.pickle`), a benchmark CSV, a predictions CSV, and a parity plot.
@@ -144,8 +144,8 @@ PET-NN/
 ├── PET_Solver.ipynb              # Original notebook: data gen, model, training, benchmarking, boundary-case analysis
 ├── PET_Solver_Explained_1.html   # Rendered walkthrough of the notebook
 ├── data_generation.py            # Standalone data generation (safe-zone + hard-region oversampling)
-├── method1.py                    # MLP surrogate, /100-style scaling
-├── method2.py                    # MLP surrogate, mean-centered scaling
+├── PET_model1.py                 # MLP surrogate, /100-style scaling
+├── PET_model2.py                 # MLP surrogate, mean-centered scaling
 ├── data/                         # Generated train/test CSVs + distribution plots
 ├── output/                       # Trained model params, benchmarks, predictions, parity plots
 └── README.md
