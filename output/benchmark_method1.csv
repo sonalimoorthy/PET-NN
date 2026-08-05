@@ -1,0 +1,9 @@
+Metric,Value
+MAE (degC),0.053850418057441694
+RMSE (degC),0.08480139088707826
+Max abs error (degC),1.6198962402343753
+Relative L2 error (%),0.24358848485088674
+Mean abs relative error (%),0.15466982787213082
+"NN runtime, 10k samples (s)",0.04173197499999333
+"pet_steady runtime, 10k samples (s)",165.96608899999956
+Speed-up (x),3976.952660400714
