@@ -142,7 +142,6 @@ Input order is `(tdb, tr, v, rh)`; `pet_nn` also accepts arrays for batched infe
 PET-NN/
 │
 ├── PET_Solver.ipynb              # Original notebook: data gen, model, training, benchmarking, boundary-case analysis
-├── PET_Solver_Explained_1.html   # Rendered walkthrough of the notebook
 ├── data_generation.py            # Standalone data generation (safe-zone + hard-region oversampling)
 ├── PET_model1.py                 # MLP surrogate, /100-style scaling
 ├── PET_model2.py                 # MLP surrogate, mean-centered scaling
